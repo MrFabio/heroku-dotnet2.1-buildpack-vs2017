@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# bin/compile <build-dir> <cache-dir>
+
+# fail fast
+set -e
+
+if [ $STACK != "cedar-14" ]; then
+	echo "Stack ${STACK} not supported" && exit 1
+fi
+
+BUILD_DIR=$1
+CACHE_DIR=$2
+ENV_DIR=$3
+# This is where the buildpack is stored
+BUILDPACK_DIR=`cd $(dirname $0); cd ..; pwd`
+
+echo "BUILD_DIR     - ${BUILD_DIR}"
+echo "CACHE_DIR     - ${CACHE_DIR}"
+echo "ENV_DIR       - ${ENV_DIR}"
+echo "BUILDPACK_DIR - ${BUILDPACK_DIR}"
+
+source $BUILDPACK_DIR/bin/util
+
+export_env_dir ${ENV_DIR}
+
+: ${LIBUV_VERSION:="1.11.0"}
+: ${NODEJS_VERSION:="10.9.0"}
+: ${DOTNET_SDK_VERSION:="2.1.403"}
+: ${DOTNET_RUNTIME_VERSION:="2.1.5"}
+: ${LIBUNWIND_VERSION:="1.1-4.1"}
+
+export NUGET_XMLDOC_MODE=skip
+export DOTNET_CLI_TELEMETRY_OPTOUT=1
+export DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1
+
+SRC_DIR=`mktemp -d`/app
+mkdir -p ${SRC_DIR}
+# Move the app source code into temporary src dir using subshell to not leak shopt
+(
+	shopt -s dotglob
+	mv ${BUILD_DIR}/* ${SRC_DIR}
+)
+
+mkdir -p ${BUILD_DIR}/.profile.d
+mkdir -p ${CACHE_DIR}
+
+# Get libunwind
+# TODO: factor this out into method
+LIBUNWIND_DEB_DIR=${CACHE_DIR}/deb/libunwind/${LIBUNWIND_VERSION}
+if [ ! -f ${LIBUNWIND_DEB_DIR}/libunwind.deb ]; then
+	rm -rf ${CACHE_DIR}/deb/libunwind/* || true
+	mkdir -p ${LIBUNWIND_DEB_DIR}
+
+	echo "Downloading libunwind version ${LIBUNWIND_VERSION}"
+	curl -o ${LIBUNWIND_DEB_DIR}/libunwind.deb -sSL https://mirrors.kernel.org/ubuntu/pool/main/libu/libunwind/libunwind8_${LIBUNWIND_VERSION}_amd64.deb
+fi
+mkdir -p ${BUILD_DIR}/.apt
+dpkg -x ${LIBUNWIND_DEB_DIR}/libunwind.deb $BUILD_DIR/.apt/
+export LD_LIBRARY_PATH="$BUILD_DIR/.apt/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH"
+cat <<EOF >$BUILD_DIR/.profile.d/000_apt.sh
+export LD_LIBRARY_PATH="\$HOME/.apt/usr/lib/x86_64-linux-gnu:\$LD_LIBRARY_PATH"
+EOF
+
+# Get Dotnet Core
+DOTNET_CACHE_LOCATION=${CACHE_DIR}/dotnet/${DOTNET_SDK_VERSION}
+if [ ! -d ${DOTNET_CACHE_LOCATION} ]; then
+	rm -rf ${CACHE_DIR}/dotnet/* || true
+	mkdir -p ${DOTNET_CACHE_LOCATION}/{sdk,runtime}
+
+	echo "Downloading .NET SDK version ${DOTNET_SDK_VERSION} and runtime version ${DOTNET_RUNTIME_VERSION}"
+
+	DOTNET_SDK_DOWNLOAD_URL=https://download.visualstudio.microsoft.com/download/pr/e85de743-f80b-481b-b10e-d2e37f05a7ce/0bf3ff93417e19ad8d6b2d3ded84d664/dotnet-sdk-$DOTNET_SDK_VERSION-linux-x64.tar.gz
+	curl -sSL ${DOTNET_SDK_DOWNLOAD_URL} | tar xz -C ${DOTNET_CACHE_LOCATION}/sdk
+	find ${DOTNET_CACHE_LOCATION}/sdk/sdk/${DOTNET_SDK_VERSION}/runtimes/* -maxdepth 0 ! -name unix ! -name any -exec rm -r {} +
+	rm -f ${DOTNET_CACHE_LOCATION}/sdk/sdk/${DOTNET_SDK_VERSION}/nuGetPackagesArchive.lzma
+
+	DOTNET_RUNTIME_DOWNLOAD_URL=https://download.visualstudio.microsoft.com/download/pr/05a71d80-3e59-4f1f-8298-2697013e261c/be191f2f4f4db74c29030008ed3632f0/dotnet-runtime-$DOTNET_RUNTIME_VERSION-linux-x64.tar.gz
+	curl -sSL ${DOTNET_RUNTIME_DOWNLOAD_URL} | tar xz -C ${DOTNET_CACHE_LOCATION}/runtime
+fi
+export PATH="${DOTNET_CACHE_LOCATION}/sdk:$PATH"
+cp -r ${DOTNET_CACHE_LOCATION}/runtime ${BUILD_DIR}/dotnet
+cat <<EOF >$BUILD_DIR/.profile.d/000_dotnet.sh
+export PATH="\$HOME/dotnet:\$PATH"
+EOF
+
+# Get Node.js
+NODEJS_CACHE_LOCATION=${CACHE_DIR}/nodejs/${NODEJS_VERSION}
+export PATH="${NODEJS_CACHE_LOCATION}/node-v${NODEJS_VERSION}-linux-x64/bin:$PATH"
+if [ ! -d ${NODEJS_CACHE_LOCATION} ]; then
+	rm -rf ${CACHE_DIR}/nodejs/* || true
+	NODEJS_DOWNLOAD_URL=https://nodejs.org/dist/v${NODEJS_VERSION}/node-v${NODEJS_VERSION}-linux-x64.tar.xz
+
+	mkdir -p ${NODEJS_CACHE_LOCATION}
+
+	echo "Downloading Node.js version ${NODEJS_VERSION}"
+	curl -sSL ${NODEJS_DOWNLOAD_URL} | tar xJ -C ${NODEJS_CACHE_LOCATION}
+	npm install -g grunt-cli bower yarn gulp
+fi
+npm config set cache ${NODEJS_CACHE_LOCATION}/npm/cache -g
+
+# Build the project
+
+SOLUTION_FILES=$(find ${SRC_DIR}/. -maxdepth 3 -iname *.sln)
+printf 'Found %s .sln files\n' $(echo "$SOLUTION_FILES" | wc -l | tr -d ' ')
+SOLUTION_FILE_FOUND=$(echo "$SOLUTION_FILES" | head -1)
+
+#Get project name
+#PROJECT_NAME="${SOLUTION_FILE_FOUND##*/}"
+#PROJECT_NAME="${PROJECT_NAME/.sln/}"
+PROJECT_NAME="ResidentesServer"
+
+echo "Project name: ${PROJECT_NAME}"
+
+PROJECT_FILES=$(find ${SRC_DIR}/. -maxdepth 3 -iname ${PROJECT_NAME}.csproj)
+printf 'Found %s .csproj files\n' $(echo "$PROJECT_FILES" | wc -l | tr -d ' ')
+PROJECT_FILE=$(echo "$PROJECT_FILES" | head -1)
+
+NUGETCONFIGS=$(find ${SRC_DIR}/. -maxdepth 3 -iname NuGet.Config)
+printf 'Found %s NuGet config files\n' $(echo "$NUGETCONFIGS" | wc -l | tr -d ' ')
+NUGETCONFIG=$(echo "$NUGETCONFIGS" | head -1)
+
+echo "Building ${PROJECT_FILE}"
+
+export NUGET_PACKAGES="${CACHE_DIR}/nuget/cache"
+
+if [ ! -e ${NUGETCONFIG}]; then
+	echo "dotnet restore ${PROJECT_FILE} using ${NUGETCONFIG}"
+	dotnet restore --configfile ${NUGETCONFIG} --runtime ubuntu.14.04-x64 ${PROJECT_FILE}
+else
+	echo "dotnet restore ${PROJECT_FILE}"
+	dotnet restore --runtime ubuntu.14.04-x64 ${PROJECT_FILE}
+fi
+
+echo "dotnet publish ${PROJECT_FILE} --output ${BUILD_DIR} --configuration Release"
+dotnet publish ${PROJECT_FILE} --output ${BUILD_DIR} --configuration Release
+
+# Get libuv
+LIBUV_CACHE_LOCATION=${CACHE_DIR}/libuv/${LIBUV_VERSION}
+if [ ! -d ${LIBUV_CACHE_LOCATION} ]; then
+	rm -rf ${CACHE_DIR}/libuv/* || true
+	mkdir -p ${LIBUV_CACHE_LOCATION}
+
+	echo "Downloading libuv version ${LIBUV_VERSION}"
+	curl https://github.com/friism/libuv-builder/releases/download/v${LIBUV_VERSION}/libuv-${LIBUV_VERSION}.tar.gz -sSL \
+	 | tar xz -C ${LIBUV_CACHE_LOCATION}
+fi
+cp -r ${LIBUV_CACHE_LOCATION}/libuv ${BUILD_DIR}
+cat <<EOF >$BUILD_DIR/.profile.d/000_libuv.sh
+export LD_LIBRARY_PATH="\$HOME/libuv/lib:\$LD_LIBRARY_PATH"
+EOF
+
+if [ -e ${SRC_DIR}/Procfile ]; then
+	cp ${SRC_DIR}/Procfile ${BUILD_DIR}
+else
+	cat << EOT >> ${BUILD_DIR}/Procfile
+web: ASPNETCORE_URLS='http://+:\$PORT' dotnet ./${PROJECT_NAME}.dll --urls http://+:\$PORT
+EOT
+fi
