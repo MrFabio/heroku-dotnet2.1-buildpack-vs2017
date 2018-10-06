@@ -1,16 +1,11 @@
 # .NET Core 2.1+ Buildpack
 This is a [Heroku buildpack](http://devcenter.heroku.com/articles/buildpack) for building [.NET Core](https://www.microsoft.com/net/core) apps using [`.csproj` files](https://docs.microsoft.com/en-us/dotnet/articles/core/tools/project-json).
 
-
-By the moment, it's only compatible with [Cedar-14 stack](https://devcenter.heroku.com/articles/cedar-14-stack), so you have to downgrade your stack if you actually use [Heroku-16 Stack](https://devcenter.heroku.com/articles/heroku-16-stack).
-
 **Please note:** 
 This buildpack is an experimental project and is not officially supported.
 
 
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*based on [https://github.com/PWNTechIT/dotnet-buildpack-vs2017](https://github.com/PWNTechIT/dotnet-buildpack-vs2017)*
-
-&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*forked from [https://github.com/jaguado/dotnet-buildpack-vs2017](https://github.com/jaguado/dotnet-buildpack-vs2017)*
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;*based on [.NET Core 2.0+ Buildpack](https://github.com/MrFabio/heroku-dotnet2.0-buildpack-vs2017)*
 
 **Versions**
 
